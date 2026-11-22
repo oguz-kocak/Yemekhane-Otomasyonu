@@ -1,7 +1,44 @@
+import json
+import logging
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connections, transaction
+
+from .redis_client import get_redis_client
+
+
+cache_logger = logging.getLogger('api.cache')
+MENU_INDEX_KEY = 'menu:index'
+
+
+def _menu_cache_key(menu):
+    menu_date = menu['tarih']
+    if hasattr(menu_date, 'isoformat'):
+        menu_date = menu_date.isoformat()[:10]
+    return f"menu:{menu['yemekhane_id']}:{menu_date}:{menu['ogun_id']}"
+
+
+def _menu_ttl(menu_date):
+    if hasattr(menu_date, 'date') and not isinstance(menu_date, type(datetime.now().date())):
+        menu_date = menu_date.date()
+    if isinstance(menu_date, str):
+        menu_date = datetime.fromisoformat(menu_date[:10]).date()
+    zone = ZoneInfo('Europe/Istanbul')
+    expires_at = datetime.combine(menu_date + timedelta(days=1), time.min, tzinfo=zone)
+    return max(1, int((expires_at - datetime.now(zone)).total_seconds()))
 
 
 def get_menus():
+    redis_client = get_redis_client()
+    cached_keys = redis_client.get(MENU_INDEX_KEY)
+    if cached_keys:
+        cached_menus = [redis_client.get(key) for key in json.loads(cached_keys)]
+        if cached_menus and all(cached_menus):
+            cache_logger.info('Menü kaynağı: Redis')
+            return [json.loads(menu) for menu in cached_menus]
+
     with connections["replica"].cursor() as cursor:
         cursor.execute("""
             SELECT
@@ -27,6 +64,7 @@ def get_menus():
                    d.alerjenler
             FROM v_menu_detay AS d
             JOIN v_menu_doluluk AS f ON f.menu_id = d.menu_id
+            WHERE d.tarih >= CURDATE()
             ORDER BY d.tarih, d.yemekhane_id, d.ogun_sira, d.kategori_sira, d.yemek
         """)
         columns = [column[0] for column in cursor.description]
@@ -56,7 +94,19 @@ def get_menus():
         })
         menus[menu_id]['toplam_kalori'] += row['kalori']
 
-    return list(menus.values())
+    result = list(menus.values())
+    cache_keys = []
+    minimum_ttl = None
+    for menu in result:
+        key = _menu_cache_key(menu)
+        ttl = _menu_ttl(menu['tarih'])
+        redis_client.setex(key, ttl, json.dumps(menu, cls=DjangoJSONEncoder))
+        cache_keys.append(key)
+        minimum_ttl = ttl if minimum_ttl is None else min(minimum_ttl, ttl)
+    if cache_keys:
+        redis_client.setex(MENU_INDEX_KEY, minimum_ttl, json.dumps(cache_keys))
+    cache_logger.info('Menü kaynağı: Veritabanı')
+    return result
 
 
 def find_active_user_by_email(email):
@@ -350,6 +400,7 @@ def get_admin_panel_data():
 
 def save_admin_menu(user_id, menu_id, restaurant_id, menu_date, meal_id, student_price, staff_price, food_ids):
     """Yönetici yetkisini kaynakta doğrulayıp menüyü kaynak veritabanında kaydeder."""
+    old_cache_key = None
     with transaction.atomic(using='default'):
         with connections['default'].cursor() as cursor:
             cursor.execute(
@@ -371,6 +422,13 @@ def save_admin_menu(user_id, menu_id, restaurant_id, menu_date, meal_id, student
                 menu_id = cursor.lastrowid
             else:
                 cursor.execute(
+                    'SELECT yemekhane_id, tarih, ogun_id FROM menuler WHERE id = %s',
+                    [menu_id],
+                )
+                old_menu = cursor.fetchone()
+                if old_menu:
+                    old_cache_key = f'menu:{old_menu[0]}:{old_menu[1].isoformat()}:{old_menu[2]}'
+                cursor.execute(
                     """
                     UPDATE menuler
                     SET yemekhane_id = %s, tarih = %s, ogun_id = %s,
@@ -389,5 +447,17 @@ def save_admin_menu(user_id, menu_id, restaurant_id, menu_date, meal_id, student
                 'INSERT INTO menu_yemekleri (menu_id, yemek_id) VALUES (%s, %s)',
                 [(menu_id, food_id) for food_id in food_ids],
             )
+
+    # Commit tamamlandıktan sonra eski ve yeni menü anahtarlarını temizle.
+    try:
+        redis_client = get_redis_client()
+        new_cache_key = f'menu:{restaurant_id}:{menu_date}:{meal_id}'
+        keys_to_delete = [MENU_INDEX_KEY, new_cache_key]
+        if old_cache_key:
+            keys_to_delete.append(old_cache_key)
+        redis_client.delete(*keys_to_delete)
+        cache_logger.info('Yönetici menü kaydetti; ilgili menü önbelleği silindi.')
+    except Exception:
+        cache_logger.exception('Menü kaydedildi ancak Redis önbelleği temizlenemedi.')
 
     return {'menu_id': menu_id}

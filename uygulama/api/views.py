@@ -22,6 +22,7 @@ from .repositories import (
     get_admin_panel_data,
     save_admin_menu,
 )
+from .sessions import start_redis_session, end_redis_session
 
 
 @require_GET
@@ -42,13 +43,13 @@ def menu_listesi(request):
 
 @require_GET
 def oturum(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
     kullanici = find_active_user_by_id(kullanici_id)
     if kullanici is None:
-        request.session.flush()
+        end_redis_session(request)
         return JsonResponse({'hata': 'Kullanıcı hesabı bulunamadı.'}, status=401)
 
     return JsonResponse({'kullanici': kullanici})
@@ -56,7 +57,7 @@ def oturum(request):
 
 @require_POST
 def rezervasyon_yap(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
@@ -81,7 +82,7 @@ def rezervasyon_yap(request):
 
 @require_GET
 def rezervasyonlarim(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
@@ -93,7 +94,7 @@ def rezervasyonlarim(request):
 
 @require_POST
 def rezervasyon_iptal(request, reservation_id):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
@@ -107,7 +108,7 @@ def rezervasyon_iptal(request, reservation_id):
 
 @require_GET
 def bakiye(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
@@ -122,7 +123,7 @@ def bakiye(request):
 
 @require_POST
 def bakiye_yukle(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
@@ -148,7 +149,7 @@ def bakiye_yukle(request):
 
 @require_GET
 def degerlendirmelerim(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
@@ -160,7 +161,7 @@ def degerlendirmelerim(request):
 
 @require_POST
 def degerlendirme_yap(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
 
@@ -193,7 +194,7 @@ def degerlendirme_yap(request):
 
 
 def yonetici_id(request):
-    kullanici_id = request.session.get('kullanici_id')
+    kullanici_id = request.user_id
     if kullanici_id is None:
         return None, JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
     kullanici = find_active_user_by_id(kullanici_id)
@@ -323,11 +324,11 @@ def giris(request):
         return JsonResponse({'hata': 'E-posta veya şifre hatalı.'}, status=401)
 
     kullanici.pop('sifre_hash')
-    request.session['kullanici_id'] = kullanici['id']
+    start_redis_session(request, kullanici['id'])
     return JsonResponse({'kullanici': kullanici})
 
 
 @require_POST
 def cikis(request):
-    request.session.flush()
+    end_redis_session(request)
     return JsonResponse({'mesaj': 'Çıkış yapıldı.'})
