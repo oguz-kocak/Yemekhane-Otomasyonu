@@ -21,6 +21,7 @@
     .yemek-secimi { display: flex; gap: 0.5rem; align-items: center; padding-block: 0.2rem; }
     .yemek-secimi input { width: auto; }
     .ikincil { color: var(--metin-soluk); }
+    .alerjen-uyarisi { color: var(--hata); font-weight: 700; }
     #oturum-bilgisi { margin-top: 1rem; overflow-wrap: anywhere; }
     @media (max-width: 480px) {
       .sayfa { margin: 1rem auto; }
@@ -62,8 +63,21 @@
         <button id="rezervasyonlar-dugmesi" class="dugme" type="button">Rezervasyonlarım</button>
         <button id="bakiye-dugmesi" class="dugme" type="button">Bakiye</button>
         <button id="degerlendirme-dugmesi" class="dugme" type="button">Değerlendirme</button>
+        <button id="profil-dugmesi" class="dugme" type="button">Alerji profili</button>
         <button id="yonetici-dugmesi" class="dugme" type="button" hidden>Yönetici paneli</button>
       </nav>
+
+      <section id="profil-bolumu" hidden>
+        <section class="kart">
+          <h1>Alerji profili</h1>
+          <p>Seçtiğin alerjenleri içeren yemekler menüde uyarıyla gösterilir.</p>
+          <form id="profil-formu">
+            <div id="alerjen-secimleri" class="yemek-secimleri"></div>
+            <button class="dugme" type="submit">Alerji profilini kaydet</button>
+          </form>
+          <p id="profil-mesaji" class="bildirim" role="status" aria-live="polite" hidden></p>
+        </section>
+      </section>
 
       <section id="bugun-bolumu">
         <section class="kart" aria-label="Menü filtreleri">
@@ -204,6 +218,9 @@
     const degerlendirmeBolumu = document.getElementById('degerlendirme-bolumu');
     const degerlendirmeListesi = document.getElementById('degerlendirme-listesi');
     const degerlendirmeMesaji = document.getElementById('degerlendirme-mesaji');
+    const profilBolumu = document.getElementById('profil-bolumu');
+    const profilMesaji = document.getElementById('profil-mesaji');
+    const alerjenSecimleri = document.getElementById('alerjen-secimleri');
     const yoneticiBolumu = document.getElementById('yonetici-bolumu');
     const yoneticiMesaji = document.getElementById('yonetici-mesaji');
     const yoneticiMenuListesi = document.getElementById('yonetici-menu-listesi');
@@ -215,6 +232,8 @@
     let haftalikMenuler = [];
     let yoneticiVerisi = null;
     let seciliYemekIdleri = new Set();
+    let seciliAlerjenIdleri = new Set();
+    let alerjenAdlari = new Map();
 
     function csrfTokeni() {
       const parca = document.cookie.split('; ').find(deger => deger.startsWith('csrftoken='));
@@ -265,7 +284,10 @@
       const fiyat = kullanici.rol === 'ogrenci' ? menu.ogrenci_fiyati : menu.personel_fiyati;
       const ozet = document.createElement('p');
       ozet.className = 'ikincil';
-      ozet.textContent = `Fiyat: ${fiyat} TL · Boş yer: ${menu.bos_yer} / ${menu.kapasite} · Toplam: ${menu.toplam_kalori} kcal`;
+      const fiyatMetni = Number(menu.ogun_id) === 1
+        ? `Tam porsiyon: ${fiyat} TL`
+        : `Tam porsiyon: ${fiyat} TL · Yarım porsiyon: ${(Number(fiyat) * 0.60).toFixed(2)} TL`;
+      ozet.textContent = `${fiyatMetni} · Boş yer: ${menu.bos_yer} / ${menu.kapasite} · Toplam: ${menu.toplam_kalori} kcal`;
       kart.append(ozet);
 
       const yemekListesi = document.createElement('ul');
@@ -275,11 +297,37 @@
         if (yemek.vejetaryen) etiketler.push('Vejetaryen');
         if (yemek.alerjenler) etiketler.push(`Alerjen: ${yemek.alerjenler}`);
         satir.textContent = `${yemek.ad} · ${etiketler.join(' · ')}`;
+        const eslesenAlerjenler = (yemek.alerjen_idler || [])
+          .filter(id => seciliAlerjenIdleri.has(Number(id)))
+          .map(id => alerjenAdlari.get(Number(id)))
+          .filter(Boolean);
+        if (eslesenAlerjenler.length) {
+          satir.classList.add('alerjen-uyarisi');
+          satir.textContent += ` · ⚠ Profilindeki alerjen: ${eslesenAlerjenler.join(', ')}`;
+        }
         yemekListesi.append(satir);
       }
       kart.append(yemekListesi);
 
       if (haftalik) {
+        if (Number(menu.ogun_id) !== 1) {
+          const porsiyonAlani = document.createElement('div');
+          porsiyonAlani.className = 'alan';
+          const porsiyonEtiketi = document.createElement('label');
+          porsiyonEtiketi.textContent = 'Porsiyon';
+          const porsiyonSecimi = document.createElement('select');
+          porsiyonSecimi.className = 'porsiyon-secimi';
+          const tamSecenegi = document.createElement('option');
+          tamSecenegi.value = 'tam';
+          tamSecenegi.textContent = 'Tam porsiyon';
+          const yarimSecenegi = document.createElement('option');
+          yarimSecenegi.value = 'yarim';
+          yarimSecenegi.textContent = 'Yarım porsiyon (%60 ücret)';
+          porsiyonSecimi.append(tamSecenegi, yarimSecenegi);
+          porsiyonEtiketi.append(porsiyonSecimi);
+          porsiyonAlani.append(porsiyonEtiketi);
+          kart.append(porsiyonAlani);
+        }
         const rezervasyonSon = new Date(menu.rezervasyon_son);
         const kapali = rezervasyonSon <= new Date() || Number(menu.bos_yer) < 1;
         const dugme = document.createElement('button');
@@ -341,6 +389,24 @@
       haftalikMenuleriGoster();
     }
 
+    async function alerjenProfiliniYukle() {
+      const profil = await apiIstek('/api/profil/alerjenler/');
+      seciliAlerjenIdleri = new Set(profil.secili_alerjen_idleri.map(Number));
+      alerjenAdlari = new Map(profil.alerjenler.map(item => [Number(item.id), item.ad]));
+      alerjenSecimleri.replaceChildren();
+      for (const alerjen of profil.alerjenler) {
+        const etiket = document.createElement('label');
+        etiket.className = 'yemek-secimi';
+        const onay = document.createElement('input');
+        onay.type = 'checkbox';
+        onay.className = 'alerjen-tercihi';
+        onay.value = alerjen.id;
+        onay.checked = seciliAlerjenIdleri.has(Number(alerjen.id));
+        etiket.append(onay, document.createTextNode(alerjen.ad));
+        alerjenSecimleri.append(etiket);
+      }
+    }
+
     function bolumGoster(aktifBolum) {
       bugunBolumu.hidden = aktifBolum !== bugunBolumu;
       haftaBolumu.hidden = aktifBolum !== haftaBolumu;
@@ -348,6 +414,7 @@
       bakiyeBolumu.hidden = aktifBolum !== bakiyeBolumu;
       degerlendirmeBolumu.hidden = aktifBolum !== degerlendirmeBolumu;
       yoneticiBolumu.hidden = aktifBolum !== yoneticiBolumu;
+      profilBolumu.hidden = aktifBolum !== profilBolumu;
     }
 
     async function rezervasyonlariYukle() {
@@ -374,7 +441,8 @@
 
         const durumAdlari = { aktif: 'Aktif', kullanildi: 'Kullanıldı', iptal: 'İptal edildi' };
         const bilgi = document.createElement('p');
-        bilgi.textContent = `Durum: ${durumAdlari[rezervasyon.durum] || rezervasyon.durum} · Ücret: ${rezervasyon.ucret} TL`;
+        const porsiyon = rezervasyon.porsiyon === 'yarim' ? 'Yarım porsiyon' : 'Tam porsiyon';
+        bilgi.textContent = `Durum: ${durumAdlari[rezervasyon.durum] || rezervasyon.durum} · ${porsiyon} · Ücret: ${rezervasyon.ucret} TL`;
         kart.append(bilgi);
 
         const iptalSuresiAcik = new Date(rezervasyon.rezervasyon_son) > new Date();
@@ -605,6 +673,7 @@
       document.getElementById('kullanici-bilgisi').textContent =
         `Merhaba ${kullanici.ad} ${kullanici.soyad} · Bakiye: ${kullanici.bakiye} TL`;
       document.getElementById('yonetici-dugmesi').hidden = kullanici.rol !== 'yonetici';
+      await alerjenProfiliniYukle();
       await menuYukle();
       mesaj.hidden = true;
     }
@@ -708,6 +777,30 @@
         yoneticiMesaji.textContent = hata.message || 'Yönetici paneli yüklenemedi.';
       }
     });
+    document.getElementById('profil-dugmesi').addEventListener('click', () => {
+      bolumGoster(profilBolumu);
+    });
+    document.getElementById('profil-formu').addEventListener('submit', async olay => {
+      olay.preventDefault();
+      const secimler = [...document.querySelectorAll('.alerjen-tercihi:checked')]
+        .map(input => Number(input.value));
+      try {
+        await apiIstek('/api/profil/alerjenler/kaydet/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfTokeni() },
+          body: JSON.stringify({ alerjen_idleri: secimler })
+        });
+        seciliAlerjenIdleri = new Set(secimler);
+        profilMesaji.hidden = false;
+        profilMesaji.className = 'bildirim bildirim-basari';
+        profilMesaji.textContent = 'Alerji profilin kaydedildi; menü uyarıları güncellendi.';
+        await menuYukle();
+      } catch (hata) {
+        profilMesaji.hidden = false;
+        profilMesaji.className = 'bildirim bildirim-hata';
+        profilMesaji.textContent = hata.message || 'Alerji profili kaydedilemedi.';
+      }
+    });
     haftalikMenuListesi.addEventListener('click', async olay => {
       const dugme = olay.target.closest('.rezervasyon-dugmesi');
       if (!dugme) return;
@@ -719,14 +812,18 @@
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfTokeni()
           },
-          body: JSON.stringify({ menu_id: Number(dugme.dataset.menuId) })
+          body: JSON.stringify({
+            menu_id: Number(dugme.dataset.menuId),
+            porsiyon: dugme.closest('.menu-karti').querySelector('.porsiyon-secimi')?.value || 'tam'
+          })
         });
         kullanici.bakiye = veri.bakiye;
         document.getElementById('kullanici-bilgisi').textContent =
           `Merhaba ${kullanici.ad} ${kullanici.soyad} · Bakiye: ${kullanici.bakiye} TL`;
         rezervasyonMesaji.hidden = false;
         rezervasyonMesaji.className = 'bildirim bildirim-basari';
-        rezervasyonMesaji.textContent = `Rezervasyon tamamlandı. Ücret: ${veri.ucret} TL. Yeni bakiye: ${veri.bakiye} TL.`;
+        const porsiyonMetni = veri.porsiyon === 'yarim' ? 'Yarım porsiyon' : 'Tam porsiyon';
+        rezervasyonMesaji.textContent = `${porsiyonMetni} rezervasyonu tamamlandı. Ücret: ${veri.ucret} TL. Yeni bakiye: ${veri.bakiye} TL.`;
         await menuYukle();
       } catch (hata) {
         dugme.disabled = false;

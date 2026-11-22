@@ -21,6 +21,8 @@ from .repositories import (
     make_reservation,
     get_admin_panel_data,
     save_admin_menu,
+    get_allergen_profile,
+    save_allergen_profile,
 )
 from .sessions import start_redis_session, end_redis_session
 
@@ -64,17 +66,50 @@ def rezervasyon_yap(request):
     try:
         veri = json.loads(request.body)
         menu_id = veri.get('menu_id') if isinstance(veri, dict) else None
+        portion = veri.get('porsiyon', 'tam') if isinstance(veri, dict) else 'tam'
         if isinstance(menu_id, bool):
             raise ValueError
         menu_id = int(menu_id)
         if menu_id < 1:
             raise ValueError
+        if portion not in ('tam', 'yarim'):
+            raise ValueError
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
-        return JsonResponse({'hata': 'Geçerli bir menü seçilmelidir.'}, status=400)
+        return JsonResponse({'hata': 'Geçerli bir menü ve porsiyon seçilmelidir.'}, status=400)
 
     try:
-        sonuc = make_reservation(kullanici_id, menu_id)
+        sonuc = make_reservation(kullanici_id, menu_id, portion)
         return JsonResponse(sonuc)
+    except DatabaseError as hata:
+        mesaj = hata.args[1] if len(hata.args) > 1 else str(hata)
+        return JsonResponse({'hata': str(mesaj)}, status=400)
+
+
+@require_GET
+def alerjen_profili(request):
+    if request.user_id is None:
+        return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
+    try:
+        return JsonResponse(get_allergen_profile(request.user_id))
+    except Exception as hata:
+        return JsonResponse({'hata': str(hata)}, status=500)
+
+
+@require_POST
+def alerjen_profili_kaydet(request):
+    if request.user_id is None:
+        return JsonResponse({'hata': 'Önce giriş yapmalısınız.'}, status=401)
+    try:
+        veri = json.loads(request.body)
+        allergen_ids = veri.get('alerjen_idleri') if isinstance(veri, dict) else None
+        if not isinstance(allergen_ids, list) or any(isinstance(item, bool) for item in allergen_ids):
+            raise ValueError
+        allergen_ids = list(dict.fromkeys(int(item) for item in allergen_ids))
+        if any(item < 1 for item in allergen_ids):
+            raise ValueError
+        return JsonResponse(save_allergen_profile(request.user_id, allergen_ids))
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        return JsonResponse({'hata': 'Geçerli alerjen seçimleri gönderilmelidir.'}, status=400)
     except DatabaseError as hata:
         mesaj = hata.args[1] if len(hata.args) > 1 else str(hata)
         return JsonResponse({'hata': str(mesaj)}, status=400)

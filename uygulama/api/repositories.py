@@ -36,8 +36,15 @@ def get_menus():
     if cached_keys:
         cached_menus = [redis_client.get(key) for key in json.loads(cached_keys)]
         if cached_menus and all(cached_menus):
-            cache_logger.info('Menü kaynağı: Redis')
-            return [json.loads(menu) for menu in cached_menus]
+            parsed_menus = [json.loads(menu) for menu in cached_menus]
+            if all(
+                'alerjen_idler' in yemek
+                for menu in parsed_menus
+                for yemek in menu.get('yemekler', [])
+            ):
+                cache_logger.info('Menü kaynağı: Redis')
+                return parsed_menus
+            redis_client.delete(MENU_INDEX_KEY)
 
     with connections["replica"].cursor() as cursor:
         cursor.execute("""
@@ -61,7 +68,8 @@ def get_menus():
                    d.kategori,
                    d.kalori,
                    d.vejetaryen,
-                   d.alerjenler
+                   d.alerjenler,
+                   d.alerjen_idler
             FROM v_menu_detay AS d
             JOIN v_menu_doluluk AS f ON f.menu_id = d.menu_id
             WHERE d.tarih >= CURDATE()
@@ -91,6 +99,9 @@ def get_menus():
             'kalori': row['kalori'],
             'vejetaryen': bool(row['vejetaryen']),
             'alerjenler': row['alerjenler'] or '',
+            'alerjen_idler': [
+                int(item) for item in (row['alerjen_idler'] or '').split(',') if item
+            ],
         })
         menus[menu_id]['toplam_kalori'] += row['kalori']
 
@@ -164,10 +175,10 @@ def find_active_user_by_id(user_id):
     }
 
 
-def make_reservation(user_id, menu_id):
+def make_reservation(user_id, menu_id, portion):
     """Rezervasyonu kaynak veritabanındaki yordamla yapar."""
     with connections['default'].cursor() as cursor:
-        cursor.execute('CALL sp_rezervasyon_yap(%s, %s)', [user_id, menu_id])
+        cursor.execute('CALL sp_rezervasyon_yap(%s, %s, %s)', [user_id, menu_id, portion])
         sonuc = cursor.fetchone()
         # MySQL CALL sonrasında kalan sonuç kümelerini temizle.
         while cursor.nextset():
@@ -184,6 +195,7 @@ def make_reservation(user_id, menu_id):
         'rezervasyon_id': sonuc[0],
         'ucret': str(sonuc[1]),
         'bakiye': str(bakiye),
+        'porsiyon': sonuc[3],
     }
 
 
@@ -192,7 +204,7 @@ def get_user_reservations(user_id):
     with connections['replica'].cursor() as cursor:
         cursor.execute(
             """
-            SELECT r.id AS rezervasyon_id, r.menu_id, r.durum, r.ucret,
+            SELECT r.id AS rezervasyon_id, r.menu_id, r.durum, r.porsiyon, r.ucret,
                    m.tarih, yh.ad AS yemekhane, o.ad AS ogun,
                    TIMESTAMP(m.tarih, o.son_saat) AS rezervasyon_son
             FROM rezervasyonlar r
@@ -210,6 +222,39 @@ def get_user_reservations(user_id):
     for row in rows:
         row['ucret'] = str(row['ucret'])
     return rows
+
+
+def get_allergen_profile(user_id):
+    """Alerjen seçeneklerini ve kullanıcının tercihlerini salt okunur replikadan alır."""
+    with connections['replica'].cursor() as cursor:
+        cursor.execute('SELECT id, ad FROM alerjenler ORDER BY ad')
+        allergens = [{'id': row[0], 'ad': row[1]} for row in cursor.fetchall()]
+        cursor.execute(
+            'SELECT alerjen_id FROM kullanici_alerjenleri WHERE kullanici_id = %s ORDER BY alerjen_id',
+            [user_id],
+        )
+        selected = [row[0] for row in cursor.fetchall()]
+    return {'alerjenler': allergens, 'secili_alerjen_idleri': selected}
+
+
+def save_allergen_profile(user_id, allergen_ids):
+    """Alerjen tercihlerini kaynakta tek transaction ile günceller."""
+    with transaction.atomic(using='default'):
+        with connections['default'].cursor() as cursor:
+            cursor.execute('SELECT id FROM alerjenler')
+            allowed = {row[0] for row in cursor.fetchall()}
+            if not set(allergen_ids).issubset(allowed):
+                raise ValueError('Geçersiz alerjen seçimi.')
+            cursor.execute(
+                'DELETE FROM kullanici_alerjenleri WHERE kullanici_id = %s',
+                [user_id],
+            )
+            if allergen_ids:
+                cursor.executemany(
+                    'INSERT INTO kullanici_alerjenleri (kullanici_id, alerjen_id) VALUES (%s, %s)',
+                    [(user_id, allergen_id) for allergen_id in allergen_ids],
+                )
+    return {'secili_alerjen_idleri': allergen_ids}
 
 
 def cancel_reservation(user_id, reservation_id):
